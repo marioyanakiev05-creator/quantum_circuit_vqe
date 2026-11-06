@@ -1,221 +1,138 @@
 import numpy as np
 from typing import Optional, Tuple, List
 
+
 class StatevectorSimulator:
-    """
-    Statevector simulator for n qubits.
-    """
-    
-    def __init__(self, n_qubits: int, initial_state: Optional[np.ndarray] = None):
-        self.n_qubits = n_qubits
-        self.dim = 1 << n_qubits
-        
-        if initial_state is None:
-            self.state = np.zeros(self.dim, dtype=complex)
-            self.state[0] = 1.0 + 0j
-        else:
-            if initial_state.shape != (self.dim,):
-                raise ValueError(f"Initial state must have length {self.dim}")
-            norm = np.linalg.norm(initial_state)
-            if abs(norm - 1.0) > 1e-10:
-                raise ValueError("Initial state must be normalized")
-            self.state = initial_state.astype(complex)
+    """Statevector simulator using |q0 q1 ... q(n-1)> ordering."""
 
-    def normalize(self):
-        norm = np.linalg.norm(self.state)
-        if norm > 0:
-            self.state /= norm
-
-    # Single-qubit gates
     X = np.array([[0, 1], [1, 0]], dtype=complex)
+    Y = np.array([[0, -1j], [1j, 0]], dtype=complex)
     Z = np.array([[1, 0], [0, -1]], dtype=complex)
     H = np.array([[1, 1], [1, -1]], dtype=complex) / np.sqrt(2)
 
     @staticmethod
     def Rx(theta: float) -> np.ndarray:
-        cos = np.cos(theta / 2)
-        sin = np.sin(theta / 2)
-        return np.array([[cos, -1j * sin], [-1j * sin, cos]], dtype=complex)
+        c, s = np.cos(theta / 2), np.sin(theta / 2)
+        return np.array([[c, -1j * s], [-1j * s, c]], dtype=complex)
 
     @staticmethod
     def Ry(theta: float) -> np.ndarray:
-        cos = np.cos(theta / 2)
-        sin = np.sin(theta / 2)
-        return np.array([[cos, -sin], [sin, cos]], dtype=complex)
+        c, s = np.cos(theta / 2), np.sin(theta / 2)
+        return np.array([[c, -s], [s, c]], dtype=complex)
 
     @staticmethod
     def Rz(theta: float) -> np.ndarray:
         phase = np.exp(-1j * theta / 2)
-        return np.array([[phase, 0], [0, np.conj(phase)]], dtype=complex)
+        return np.diag([phase, np.conj(phase)])
 
     S = Rz(np.pi / 2)
     T = Rz(np.pi / 4)
 
-    def apply_gate(self, gate_matrix: np.ndarray, qubits: Tuple[int, ...]):
-        target = qubits[0]
+    def __init__(self, n_qubits: int, initial_state: Optional[np.ndarray] = None):
+        if n_qubits < 1:
+            raise ValueError("n_qubits must be positive")
+        self.n_qubits = n_qubits
+        self.dim = 1 << n_qubits
 
-        if not (0 <= target < self.n_qubits):
-            raise ValueError(f"Qubit {target} out of range")
-        
-        full_U = self._build_full_unitary(gate_matrix, target)
-        self.state = full_U @ self.state
-        self.normalize()
+        if initial_state is None:
+            self.state = np.zeros(self.dim, dtype=complex)
+            self.state[0] = 1.0
+        else:
+            state = np.asarray(initial_state, dtype=complex)
+            if state.shape != (self.dim,):
+                raise ValueError(f"Initial state must have length {self.dim}")
+            if not np.isclose(np.linalg.norm(state), 1.0, atol=1e-10):
+                raise ValueError("Initial state must be normalized")
+            self.state = state.copy()
+
+    def normalize(self):
+        norm = np.linalg.norm(self.state)
+        if norm == 0:
+            raise ValueError("Cannot normalize a zero state")
+        self.state /= norm
+
+    def _mask(self, qubit: int) -> int:
+        if not (0 <= qubit < self.n_qubits):
+            raise ValueError(f"Qubit {qubit} out of range")
+        return 1 << (self.n_qubits - 1 - qubit)
+
+    def apply_gate(self, gate_matrix: np.ndarray, qubits: Tuple[int, ...]):
+        if len(qubits) != 1:
+            raise ValueError("apply_gate expects one target qubit")
+        gate = np.asarray(gate_matrix, dtype=complex)
+        if gate.shape != (2, 2):
+            raise ValueError("Single-qubit gate must have shape (2, 2)")
+        self.state = self._build_full_unitary(gate, qubits[0]) @ self.state
 
     def _build_full_unitary(self, gate: np.ndarray, target_qubit: int) -> np.ndarray:
-        n = self.n_qubits
-        ops = [np.eye(2, dtype=complex) for _ in range(n)]
+        self._mask(target_qubit)
+        ops = [np.eye(2, dtype=complex) for _ in range(self.n_qubits)]
         ops[target_qubit] = gate
-        U = ops[0]
+        full = ops[0]
         for op in ops[1:]:
-            U = np.kron(U, op)
-        return U
+            full = np.kron(full, op)
+        return full
 
     def swap_qubits(self, q1: int, q2: int):
+        mask1, mask2 = self._mask(q1), self._mask(q2)
         if q1 == q2:
             return
-        if q1 > q2:
-            q1, q2 = q2, q1
-        mask1 = 1 << q1
-        mask2 = 1 << q2
-        for k in range(self.dim):
-            bit1 = (k & mask1) != 0
-            bit2 = (k & mask2) != 0
-            if bit1 != bit2:
-                k_swapped = k ^ mask1 ^ mask2
-                if k < k_swapped:
-                    temp = self.state[k]
-                    self.state[k] = self.state[k_swapped]
-                    self.state[k_swapped] = temp
+        for i in range(self.dim):
+            if bool(i & mask1) != bool(i & mask2):
+                j = i ^ mask1 ^ mask2
+                if i < j:
+                    self.state[i], self.state[j] = self.state[j], self.state[i]
 
-    def cnot(self, control: int, target: int):
-        if not (0 <= control < self.n_qubits and 0 <= target < self.n_qubits):
-            raise ValueError("Control or target out of range")
+    def _cnot_unitary(self, control: int, target: int) -> np.ndarray:
+        control_mask, target_mask = self._mask(control), self._mask(target)
         if control == target:
             raise ValueError("Control and target must differ")
+        full = np.zeros((self.dim, self.dim), dtype=complex)
+        for i in range(self.dim):
+            j = i ^ target_mask if (i & control_mask) else i
+            full[j, i] = 1.0
+        return full
 
-        cnot_2q = np.array([
-            [1, 0, 0, 0],
-            [0, 1, 0, 0],
-            [0, 0, 0, 1],
-            [0, 0, 1, 0]
-        ], dtype=complex)
+    def cnot(self, control: int, target: int):
+        control_mask, target_mask = self._mask(control), self._mask(target)
+        if control == target:
+            raise ValueError("Control and target must differ")
+        for i in range(self.dim):
+            if (i & control_mask) and not (i & target_mask):
+                j = i | target_mask
+                self.state[i], self.state[j] = self.state[j], self.state[i]
 
-        self.swap_qubits(control, 0)
-        self.swap_qubits(target, 1)
-
-        U = cnot_2q
-        for _ in range(2, self.n_qubits):
-            U = np.kron(U, np.eye(2))
-
-        self.state = U @ self.state
-        self.normalize()
+    @classmethod
+    def kraus_operators(cls, channel: str, p: float) -> List[np.ndarray]:
+        if not 0 <= p <= 1:
+            raise ValueError("p must be in [0, 1]")
+        if channel == 'depolarizing':
+            return [np.sqrt(1 - 3 * p / 4) * np.eye(2),
+                    np.sqrt(p / 4) * cls.X,
+                    np.sqrt(p / 4) * cls.Y,
+                    np.sqrt(p / 4) * cls.Z]
+        if channel == 'dephasing':
+            return [np.sqrt(1 - p) * np.eye(2), np.sqrt(p) * cls.Z]
+        if channel == 'amplitude_damping':
+            return [np.array([[1, 0], [0, np.sqrt(1 - p)]], dtype=complex),
+                    np.array([[0, np.sqrt(p)], [0, 0]], dtype=complex)]
+        raise ValueError(f"Unknown channel: {channel}")
 
     def apply_noise(self, channel: str = 'depolarizing', p: float = 0.01):
-        if p < 0 or p > 1:
-            raise ValueError("p must be in [0, 1]")
-
-        if channel == 'depolarizing':
-            self._apply_depolarizing(p)
-        elif channel == 'dephasing':
-            self._apply_dephasing(p)
-        elif channel == 'amplitude_damping':
-            self._apply_amplitude_damping(p)
-        else:
-            raise ValueError("Unknown channel")
-
-        self.normalize()
-
-    def _apply_depolarizing(self, p: float):
-        sqrt_1m3p4 = np.sqrt(1 - 3*p/4)
-        sqrt_p4 = np.sqrt(p/4)
-        K0 = sqrt_1m3p4 * np.eye(2, dtype=complex)
-        K1 = sqrt_p4 * self.X
-        K2 = sqrt_p4 * (1j * self.Z @ self.X)
-        K3 = sqrt_p4 * self.Z
-        K_list = [K0, K1, K2, K3]
-
+        kraus = self.kraus_operators(channel, p)
         for q in range(self.n_qubits):
-            probs = []
-            new_states = []
-            for K in K_list:
-                full_K = self._build_full_unitary(K, q)
-                K_psi = full_K @ self.state
-                norm_sq = np.sum(np.abs(K_psi)**2)
-                probs.append(norm_sq)
-                new_states.append(K_psi)
-
-            total = sum(probs)
-            if total > 1e-12:
-                probs = [pr / total for pr in probs]
-            else:
-                probs = [1.0] + [0.0] * (len(probs)-1)
-
-            m = np.random.choice(len(probs), p=probs)
-            chosen = new_states[m]
-            self.state = chosen / np.sqrt(probs[m]) if probs[m] > 0 else chosen
-            self.normalize()  # extra safety
-
-    def _apply_dephasing(self, p: float):
-        K0 = np.sqrt(1-p) * np.eye(2, dtype=complex)
-        K1 = np.sqrt(p) * self.Z
-        K_list = [K0, K1]
-
-        for q in range(self.n_qubits):
-            probs = []
-            new_states = []
-            for K in K_list:
-                full_K = self._build_full_unitary(K, q)
-                K_psi = full_K @ self.state
-                norm_sq = np.sum(np.abs(K_psi)**2)
-                probs.append(norm_sq)
-                new_states.append(K_psi)
-
-            total = sum(probs)
-            if total > 1e-12:
-                probs = [pr / total for pr in probs]
-            else:
-                probs = [1.0] + [0.0] * (len(probs)-1)
-
-            m = np.random.choice(len(probs), p=probs)
-            chosen = new_states[m]
-            self.state = chosen / np.sqrt(probs[m]) if probs[m] > 0 else chosen
-            self.normalize()
-
-    def _apply_amplitude_damping(self, p: float):
-        K0 = np.array([[1, 0], [0, np.sqrt(1-p)]], dtype=complex)
-        K1 = np.array([[0, np.sqrt(p)], [0, 0]], dtype=complex)
-        K_list = [K0, K1]
-
-        for q in range(self.n_qubits):
-            probs = []
-            new_states = []
-            for K in K_list:
-                full_K = self._build_full_unitary(K, q)
-                K_psi = full_K @ self.state
-                norm_sq = np.sum(np.abs(K_psi)**2)
-                probs.append(norm_sq)
-                new_states.append(K_psi)
-
-            total = sum(probs)
-            if total > 1e-12:
-                probs = [pr / total for pr in probs]
-            else:
-                probs = [1.0] + [0.0] * (len(probs)-1)
-
-            m = np.random.choice(len(probs), p=probs)
-            chosen = new_states[m]
-            self.state = chosen / np.sqrt(probs[m]) if probs[m] > 0 else chosen
-            self.normalize()
+            states = [self._build_full_unitary(K, q) @ self.state for K in kraus]
+            probs = np.array([np.vdot(v, v).real for v in states])
+            probs /= probs.sum()
+            index = np.random.choice(len(states), p=probs)
+            self.state = states[index] / np.linalg.norm(states[index])
 
     def get_probabilities(self) -> np.ndarray:
         return np.abs(self.state) ** 2
 
     def measure_all(self, shots: int = 1) -> List[int]:
+        if shots < 1:
+            raise ValueError("shots must be positive")
         probs = self.get_probabilities()
-        total = np.sum(probs)
-        if abs(total - 1.0) > 1e-10:
-            probs = probs / total if total > 0 else np.ones_like(probs) / len(probs)
-        outcomes = np.random.choice(self.dim, size=shots, p=probs)
-        return outcomes.tolist()
-
-
+        probs /= probs.sum()
+        return np.random.choice(self.dim, size=shots, p=probs).tolist()
